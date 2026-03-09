@@ -1,0 +1,33 @@
+{
+  "name": "quay",
+  "version": "0.1.0",
+  "description": "Terminal multiplexer for AI coding agent sessions",
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "npm run build:electron && concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
+    "build:electron": "tsup electron/main.ts electron/preload.ts --outDir dist-electron --format cjs --external electron --external node-pty",
+    "build:renderer": "vite build",
+    "build": "npm run build:electron && npm run build:renderer",
+    "postinstall": "electron-rebuild"
+  },
+  "dependencies": {
+    "node-pty": "^1.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-webgl": "^0.18.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "concurrently": "^9.0.0",
+    "electron": "^33.0.0",
+    "electron-rebuild": "^3.2.9",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vite": "^6.0.0",
+    "wait-on": "^8.0.0"
+  }
+}
