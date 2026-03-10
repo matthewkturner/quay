@@ -1,17 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
+import pkg from './package.json';
 
 export default defineConfig({
   define: {
-    __BUILD_TIME__: JSON.stringify(
-      new Date().toLocaleString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        hour12: true,
-      }),
-    ),
+    __BUILD_VERSION__: JSON.stringify(pkg.version),
+    __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
   },
   plugins: [react()],
   root: 'src',

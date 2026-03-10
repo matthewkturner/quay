@@ -195,7 +195,9 @@ export function Sidebar({
       <button className="sidebar-add" onClick={onAdd}>
         <PlusIcon />
       </button>
-      <div className="sidebar-build-info">build: {__BUILD_TIME__}</div>
+      <div className="sidebar-build-info">
+        v{__BUILD_VERSION__} {__BUILD_DATE__}
+      </div>
     </nav>
   );
 }
