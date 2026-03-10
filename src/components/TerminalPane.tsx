@@ -35,6 +35,9 @@ const ATTENTION_PATTERNS = [
   /\d+\.\s+.*\n.*\d+\.\s+/,
   /enter a number/i,
   /choose.*:/i,
+  /Allow\s+\w+/i,
+  /\(Y\)es.*\(N\)o/,
+  /\(A\)lways allow/,
 ];
 
 // Claude's input prompt — it's done and waiting for your next message
@@ -149,6 +152,7 @@ export function TerminalPane({
   const lastStatusRef = useRef<PaneStatus>('idle');
   const outputBufferRef = useRef('');
   const hookActiveRef = useRef(false);
+  const claudeRunningRef = useRef(false);
 
   const emitStatus = useCallback(
     (status: PaneStatus) => {
@@ -161,9 +165,21 @@ export function TerminalPane({
   );
 
   useEffect(() => {
+    let hookWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+    const resetWatchdog = () => {
+      if (hookWatchdog) clearTimeout(hookWatchdog);
+      hookWatchdog = setTimeout(() => {
+        if (hookActiveRef.current && !claudeRunningRef.current) {
+          hookActiveRef.current = false;
+        }
+      }, 60000);
+    };
+
     const removeHookListener = window.quay.onHookEvent((payload: ClaudeHookPayload) => {
       if (payload.pane_id !== id) return;
       hookActiveRef.current = true;
+      resetWatchdog();
 
       const evt = payload.event?.hook_event_name;
       if (!evt) return;
@@ -191,10 +207,14 @@ export function TerminalPane({
         case 'SessionEnd':
           emitStatus('idle');
           hookActiveRef.current = false;
+          if (hookWatchdog) clearTimeout(hookWatchdog);
           break;
       }
     });
-    return removeHookListener;
+    return () => {
+      removeHookListener();
+      if (hookWatchdog) clearTimeout(hookWatchdog);
+    };
   }, [id, emitStatus]);
 
   useEffect(() => {
@@ -253,13 +273,19 @@ export function TerminalPane({
     term.loadAddon(new WebLinksAddon());
     fitAddon.fit();
 
-    let wasClaudeRunning = false;
     term.onTitleChange((t) => {
       setTitle(t);
       const isClaudeRunning = /claude/i.test(t);
-      if (isClaudeRunning !== wasClaudeRunning) {
-        wasClaudeRunning = isClaudeRunning;
+      if (isClaudeRunning !== claudeRunningRef.current) {
+        claudeRunningRef.current = isClaudeRunning;
         onClaudeChange?.(id, isClaudeRunning);
+        if (isClaudeRunning) {
+          emitStatus('busy');
+        } else {
+          hookActiveRef.current = false;
+          emitStatus('idle');
+          outputBufferRef.current = '';
+        }
       }
     });
 
@@ -304,11 +330,13 @@ export function TerminalPane({
         }
 
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-        idleTimerRef.current = setTimeout(() => {
-          if (lastStatusRef.current === 'busy') {
-            emitStatus('idle');
-          }
-        }, 6000);
+        if (!claudeRunningRef.current) {
+          idleTimerRef.current = setTimeout(() => {
+            if (lastStatusRef.current === 'busy') {
+              emitStatus('idle');
+            }
+          }, 15000);
+        }
       }
     });
 

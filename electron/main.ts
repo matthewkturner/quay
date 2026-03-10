@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import * as pty from 'node-pty';
-import { readFileSync } from 'fs';
-import { writeFile, chmod, mkdir } from 'fs/promises';
+import { readFileSync, readdirSync, rmSync } from 'fs';
+import { writeFile, chmod, mkdir, unlink, readdir } from 'fs/promises';
 import { join } from 'path';
 import { execFile } from 'child_process';
 import { createServer, IncomingMessage, ServerResponse } from 'http';
@@ -18,6 +18,8 @@ let mainWindow: BrowserWindow | null = null;
 let hookPort = 0;
 let hookServer: Server | null = null;
 
+const quayDir = join(process.env.HOME || '/', '.quay');
+const panesDir = join(quayDir, 'panes');
 const QUAY_HOOK_MARKER = '# quay-hook';
 const HOOK_EVENTS = [
   'Stop',
@@ -57,13 +59,15 @@ function startHookServer(): Promise<number> {
     hookServer.listen(0, '127.0.0.1', () => {
       const addr = hookServer!.address();
       hookPort = (addr as { port: number }).port;
-      resolve(hookPort);
+      mkdir(panesDir, { recursive: true })
+        .then(() => writeFile(join(quayDir, 'hook-port'), String(hookPort), 'utf-8'))
+        .catch((err) => console.error('[quay] Failed to write hook-port file:', err))
+        .finally(() => resolve(hookPort));
     });
   });
 }
 
 async function installHookScript(): Promise<string> {
-  const quayDir = join(process.env.HOME || '/', '.quay');
   await mkdir(quayDir, { recursive: true });
   const dest = join(quayDir, 'quay-hook.sh');
   const src = join(__dirname, 'quay-hook.sh');
@@ -166,7 +170,7 @@ function getShell(): string {
 
 ipcMain.handle(
   'terminal:create',
-  (_, id: string, cwd?: string, cmd?: string, cols?: number, rows?: number) => {
+  async (_, id: string, cwd?: string, cmd?: string, cols?: number, rows?: number) => {
     const shell = getShell();
     const env = {
       ...process.env,
@@ -183,6 +187,11 @@ ipcMain.handle(
       env,
     });
 
+    const paneFile = join(panesDir, String(term.pid));
+    await writeFile(paneFile, id, 'utf-8').catch(() => {});
+    console.log(
+      `[quay] terminal:create id=${id} pid=${term.pid} hookPort=${hookPort} cwd=${resolvedCwd}`,
+    );
     terminals.set(id, term);
 
     term.onData((data) => {
@@ -193,6 +202,7 @@ ipcMain.handle(
 
     term.onExit(() => {
       terminals.delete(id);
+      unlink(paneFile).catch(() => {});
     });
 
     if (isWin) {
@@ -375,6 +385,16 @@ const BANNER = `
 app.whenReady().then(async () => {
   console.log(BANNER);
   await startHookServer();
+  const [stalePanes, staleCache] = await Promise.all([
+    readdir(panesDir).catch(() => []),
+    readdir(quayDir)
+      .catch(() => [])
+      .then((f) => f.filter((n) => n.startsWith('cache-'))),
+  ]);
+  await Promise.all([
+    ...stalePanes.map((f) => unlink(join(panesDir, f)).catch(() => {})),
+    ...staleCache.map((f) => unlink(join(quayDir, f)).catch(() => {})),
+  ]);
   try {
     const scriptPath = await installHookScript();
     await registerHooks(scriptPath);
@@ -387,5 +407,13 @@ app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   terminals.forEach((t) => t.kill());
   if (hookServer) hookServer.close();
+  try {
+    rmSync(panesDir, { recursive: true, force: true });
+    for (const f of readdirSync(quayDir)) {
+      if (f.startsWith('cache-')) rmSync(join(quayDir, f), { force: true });
+    }
+  } catch {
+    // cleanup is best-effort on shutdown
+  }
   app.quit();
 });
