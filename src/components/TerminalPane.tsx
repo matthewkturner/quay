@@ -1,21 +1,216 @@
-import { useEffect, useRef, useState } from "react";
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
+import '@xterm/xterm/css/xterm.css';
+import type { PaneStatus, ClaudeHookPayload } from '../types';
+import { CloseIcon, SplitHorizontalIcon, SplitVerticalIcon } from './Icons';
 
 interface Props {
   id: string;
   cwd?: string;
   cmd?: string;
-  label: string;
   active: boolean;
+  fontSize?: number;
+  theme?: 'dark' | 'light';
+  onStatusChange?: (paneId: string, status: PaneStatus) => void;
+  onCwdChange?: (paneId: string, cwd: string) => void;
+  onClaudeChange?: (paneId: string, running: boolean) => void;
+  onSplitH: () => void;
+  onSplitV: () => void;
+  onClose: () => void;
 }
 
-export function TerminalPane({ id, cwd, cmd, label, active }: Props) {
+// Claude is waiting for user input (tool approval, questions, prompt)
+const ATTENTION_PATTERNS = [
+  /\[Y\/n\]/i,
+  /\[y\/N\]/i,
+  /y\/n\]?\s*$/i,
+  /press enter/i,
+  /Do you want to proceed/i,
+  /waiting for your/i,
+  /\? \(y\)es/i,
+  /approve|deny|reject/i,
+  /\? .*\(Use arrow/i,
+  /\d+\.\s+.*\n.*\d+\.\s+/,
+  /enter a number/i,
+  /choose.*:/i,
+];
+
+// Claude's input prompt — it's done and waiting for your next message
+const CLAUDE_PROMPT_PATTERNS = [/╰─[>$]\s*$/, /Human:\s*$/, /You:\s*$/];
+
+// Shell prompt returned — process exited back to shell
+const DONE_PATTERNS = [/❯\s*$/, /\$\s*$/, /total cost/i, /session ended/i];
+
+// Long-running process (dev server, watcher, etc.)
+const RUNNING_PATTERNS = [
+  /listening on/i,
+  /server running/i,
+  /watching for/i,
+  /ready in \d/i,
+  /compiled successfully/i,
+  /localhost:\d{4}/i,
+  /started server/i,
+  /hot reload/i,
+];
+
+// eslint-disable-next-line no-control-regex
+const OSC7_REGEX = /\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*)\x07/;
+// eslint-disable-next-line no-control-regex
+const ANSI_REGEX = /\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07/g;
+
+function stripAnsi(s: string): string {
+  return s.replace(ANSI_REGEX, '');
+}
+
+const DARK_THEME = {
+  background: '#0f0f1a',
+  foreground: '#f8fafc',
+  cursor: '#a78bfa',
+  selectionBackground: '#334155',
+  black: '#0f0f1a',
+  red: '#f87171',
+  green: '#4ade80',
+  yellow: '#fbbf24',
+  blue: '#60a5fa',
+  magenta: '#a78bfa',
+  cyan: '#22d3ee',
+  white: '#f8fafc',
+  brightBlack: '#475569',
+  brightRed: '#fca5a5',
+  brightGreen: '#86efac',
+  brightYellow: '#fde68a',
+  brightBlue: '#93c5fd',
+  brightMagenta: '#c4b5fd',
+  brightCyan: '#67e8f9',
+  brightWhite: '#ffffff',
+};
+
+const LIGHT_THEME = {
+  background: '#ffffff',
+  foreground: '#1e293b',
+  cursor: '#7c3aed',
+  selectionBackground: '#c7d2fe',
+  black: '#1e293b',
+  red: '#dc2626',
+  green: '#16a34a',
+  yellow: '#ca8a04',
+  blue: '#2563eb',
+  magenta: '#7c3aed',
+  cyan: '#0891b2',
+  white: '#f8fafc',
+  brightBlack: '#64748b',
+  brightRed: '#ef4444',
+  brightGreen: '#22c55e',
+  brightYellow: '#eab308',
+  brightBlue: '#3b82f6',
+  brightMagenta: '#8b5cf6',
+  brightCyan: '#06b6d4',
+  brightWhite: '#ffffff',
+};
+
+// Persist terminal instances across React remounts (portal target changes on split/close)
+const terminalCache = new Map<
+  string,
+  { term: Terminal; fitAddon: FitAddon; cleanup: () => void }
+>();
+
+// eslint-disable-next-line react-refresh/only-export-components
+export function destroyTerminal(paneId: string) {
+  const cached = terminalCache.get(paneId);
+  if (cached) {
+    cached.cleanup();
+    cached.term.dispose();
+    terminalCache.delete(paneId);
+  }
+  window.quay.kill(paneId);
+}
+
+export function TerminalPane({
+  id,
+  cwd,
+  cmd,
+  active,
+  fontSize = 12,
+  theme = 'dark',
+  onStatusChange,
+  onCwdChange,
+  onClaudeChange,
+  onSplitH,
+  onSplitV,
+  onClose,
+}: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [mounted, setMounted] = useState(false);
+  const [title, setTitle] = useState('shell');
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastStatusRef = useRef<PaneStatus>('idle');
+  const outputBufferRef = useRef('');
+  const hookActiveRef = useRef(false);
+
+  const emitStatus = useCallback(
+    (status: PaneStatus) => {
+      if (status !== lastStatusRef.current) {
+        lastStatusRef.current = status;
+        onStatusChange?.(id, status);
+      }
+    },
+    [id, onStatusChange],
+  );
+
+  useEffect(() => {
+    const removeHookListener = window.quay.onHookEvent((payload: ClaudeHookPayload) => {
+      if (payload.pane_id !== id) return;
+      hookActiveRef.current = true;
+
+      const evt = payload.event?.hook_event_name;
+      if (!evt) return;
+
+      switch (evt) {
+        case 'SessionStart':
+        case 'UserPromptSubmit':
+          emitStatus('busy');
+          break;
+        case 'Stop':
+        case 'PermissionRequest':
+          emitStatus('attention');
+          break;
+        case 'Notification': {
+          const ntype = payload.event.notification_type;
+          if (
+            ntype === 'idle_prompt' ||
+            ntype === 'elicitation_dialog' ||
+            ntype === 'permission_prompt'
+          ) {
+            emitStatus('attention');
+          }
+          break;
+        }
+        case 'SessionEnd':
+          emitStatus('idle');
+          hookActiveRef.current = false;
+          break;
+      }
+    });
+    return removeHookListener;
+  }, [id, emitStatus]);
+
+  useEffect(() => {
+    const cached = terminalCache.get(id);
+    if (cached) {
+      cached.term.options.fontSize = fontSize;
+      if (active) cached.fitAddon.fit();
+    }
+  }, [id, fontSize, active]);
+
+  useEffect(() => {
+    const cached = terminalCache.get(id);
+    if (cached) {
+      cached.term.options.theme = theme === 'light' ? LIGHT_THEME : DARK_THEME;
+    }
+  }, [id, theme]);
 
   useEffect(() => {
     if (active && !mounted) setMounted(true);
@@ -24,56 +219,118 @@ export function TerminalPane({ id, cwd, cmd, label, active }: Props) {
   useEffect(() => {
     if (!mounted || !containerRef.current) return;
 
+    const cached = terminalCache.get(id);
+    if (cached) {
+      const { term, fitAddon } = cached;
+      fitAddonRef.current = fitAddon;
+      containerRef.current.appendChild(term.element!);
+      requestAnimationFrame(() => fitAddon.fit());
+
+      const resizeObserver = new ResizeObserver(() => {
+        requestAnimationFrame(() => fitAddon.fit());
+      });
+      resizeObserver.observe(containerRef.current);
+
+      return () => {
+        resizeObserver.disconnect();
+      };
+    }
+
     const term = new Terminal({
-      fontSize: 14,
-      fontFamily: "JetBrains Mono, Cascadia Code, Menlo, monospace",
-      theme: {
-        background: "#1a1b26",
-        foreground: "#a9b1d6",
-        cursor: "#c0caf5",
-        selectionBackground: "#33467c",
-        black: "#15161e",
-        red: "#f7768e",
-        green: "#9ece6a",
-        yellow: "#e0af68",
-        blue: "#7aa2f7",
-        magenta: "#bb9af7",
-        cyan: "#7dcfff",
-        white: "#a9b1d6",
-        brightBlack: "#414868",
-        brightRed: "#f7768e",
-        brightGreen: "#9ece6a",
-        brightYellow: "#e0af68",
-        brightBlue: "#7aa2f7",
-        brightMagenta: "#bb9af7",
-        brightCyan: "#7dcfff",
-        brightWhite: "#c0caf5",
-      },
+      fontSize,
+      fontFamily: 'JetBrains Mono, Cascadia Code, Menlo, monospace',
+      theme: theme === 'light' ? LIGHT_THEME : DARK_THEME,
       cursorBlink: true,
       allowProposedApi: true,
+      scrollback: 5000,
     });
 
     const fitAddon = new FitAddon();
     term.loadAddon(fitAddon);
-    terminalRef.current = term;
     fitAddonRef.current = fitAddon;
 
     term.open(containerRef.current);
+    term.loadAddon(new WebLinksAddon());
     fitAddon.fit();
 
-    window.quay.createTerminal(id, cwd, cmd);
+    let wasClaudeRunning = false;
+    term.onTitleChange((t) => {
+      setTitle(t);
+      const isClaudeRunning = /claude/i.test(t);
+      if (isClaudeRunning !== wasClaudeRunning) {
+        wasClaudeRunning = isClaudeRunning;
+        onClaudeChange?.(id, isClaudeRunning);
+      }
+    });
+
+    term.onSelectionChange(() => {
+      const selection = term.getSelection();
+      if (selection) {
+        navigator.clipboard.writeText(selection);
+      }
+    });
+
+    window.quay.createTerminal(id, cwd, cmd, term.cols, term.rows);
 
     const removeDataListener = window.quay.onTerminalData(id, (data) => {
       term.write(data);
+
+      const osc7Match = data.match(OSC7_REGEX);
+      if (osc7Match) {
+        const rawPath = decodeURIComponent(osc7Match[1]);
+        onCwdChange?.(id, rawPath);
+      }
+
+      if (!hookActiveRef.current) {
+        outputBufferRef.current = (outputBufferRef.current + data).slice(-500);
+        const buf = stripAnsi(outputBufferRef.current);
+
+        // Attention is sticky — once detected, only user input (typing) clears it
+        const isAttention =
+          ATTENTION_PATTERNS.some((p) => p.test(buf)) ||
+          CLAUDE_PROMPT_PATTERNS.some((p) => p.test(buf));
+
+        if (isAttention) {
+          emitStatus('attention');
+        } else if (lastStatusRef.current === 'attention') {
+          // Stay in attention until we see a clear done signal (not just any output)
+        } else if (RUNNING_PATTERNS.some((p) => p.test(buf))) {
+          emitStatus('running');
+        } else if (DONE_PATTERNS.some((p) => p.test(buf))) {
+          emitStatus('idle');
+          outputBufferRef.current = '';
+        } else {
+          emitStatus('busy');
+        }
+
+        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+        idleTimerRef.current = setTimeout(() => {
+          if (lastStatusRef.current === 'busy') {
+            emitStatus('idle');
+          }
+        }, 6000);
+      }
     });
 
     term.onData((data) => {
       window.quay.sendInput(id, data);
+      // User typed — clear attention state and buffer
+      if (lastStatusRef.current === 'attention') {
+        outputBufferRef.current = '';
+        emitStatus('busy');
+      }
     });
 
     term.onResize(({ cols, rows }) => {
       window.quay.resize(id, cols, rows);
     });
+
+    const cleanup = () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      removeDataListener();
+    };
+
+    terminalCache.set(id, { term, fitAddon, cleanup });
 
     const resizeObserver = new ResizeObserver(() => {
       requestAnimationFrame(() => fitAddon.fit());
@@ -81,11 +338,10 @@ export function TerminalPane({ id, cwd, cmd, label, active }: Props) {
     resizeObserver.observe(containerRef.current);
 
     return () => {
-      removeDataListener();
       resizeObserver.disconnect();
-      term.dispose();
-      window.quay.kill(id);
     };
+    // Terminal is created once on mount — deps intentionally limited
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mounted]);
 
   useEffect(() => {
@@ -94,17 +350,30 @@ export function TerminalPane({ id, cwd, cmd, label, active }: Props) {
     }
   }, [active]);
 
-  if (!mounted) {
-    return (
-      <div className="terminal-pane">
-        <div className="pane-header">{label}</div>
+  const header = (
+    <div className="pane-header">
+      <span className="pane-title">{title}</span>
+      <div className="pane-actions">
+        <button className="pane-btn" title="Split horizontal" onClick={onSplitH}>
+          <SplitHorizontalIcon />
+        </button>
+        <button className="pane-btn" title="Split vertical" onClick={onSplitV}>
+          <SplitVerticalIcon />
+        </button>
+        <button className="pane-btn pane-btn-close" title="Close pane" onClick={onClose}>
+          <CloseIcon />
+        </button>
       </div>
-    );
+    </div>
+  );
+
+  if (!mounted) {
+    return <div className="terminal-pane">{header}</div>;
   }
 
   return (
     <div className="terminal-pane">
-      <div className="pane-header">{label}</div>
+      {header}
       <div className="pane-body" ref={containerRef} />
     </div>
   );

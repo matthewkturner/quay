@@ -1,0 +1,10 @@
+{
+  "projects": [
+    {
+      "id": "my-app",
+      "name": "My App",
+      "path": "~/code/my-app",
+      "panes": [{ "label": "agent" }, { "label": "dev" }, { "label": "shell" }]
+    }
+  ]
+}
