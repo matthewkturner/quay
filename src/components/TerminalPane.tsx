@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import '@xterm/xterm/css/xterm.css';
 import type { PaneStatus, ClaudeHookPayload } from '../types';
+import { detectStatus } from '../status-patterns';
 import { CloseIcon, SplitHorizontalIcon, SplitVerticalIcon } from './Icons';
 
 interface Props {
@@ -20,43 +21,6 @@ interface Props {
   onSplitV: () => void;
   onClose: () => void;
 }
-
-// Claude is waiting for user input (tool approval, questions, prompt)
-const ATTENTION_PATTERNS = [
-  /\[Y\/n\]/i,
-  /\[y\/N\]/i,
-  /y\/n\]?\s*$/i,
-  /press enter/i,
-  /Do you want to proceed/i,
-  /waiting for your/i,
-  /\? \(y\)es/i,
-  /approve|deny|reject/i,
-  /\? .*\(Use arrow/i,
-  /\d+\.\s+.*\n.*\d+\.\s+/,
-  /enter a number/i,
-  /choose.*:/i,
-  /Allow\s+\w+/i,
-  /\(Y\)es.*\(N\)o/,
-  /\(A\)lways allow/,
-];
-
-// Claude's input prompt — it's done and waiting for your next message
-const CLAUDE_PROMPT_PATTERNS = [/╰─[>$]\s*$/, /Human:\s*$/, /You:\s*$/];
-
-// Shell prompt returned — process exited back to shell
-const DONE_PATTERNS = [/❯\s*$/, /\$\s*$/, /total cost/i, /session ended/i];
-
-// Long-running process (dev server, watcher, etc.)
-const RUNNING_PATTERNS = [
-  /listening on/i,
-  /server running/i,
-  /watching for/i,
-  /ready in \d/i,
-  /compiled successfully/i,
-  /localhost:\d{4}/i,
-  /started server/i,
-  /hot reload/i,
-];
 
 // eslint-disable-next-line no-control-regex
 const OSC7_REGEX = /\x1b\]7;file:\/\/[^/]*([^\x07\x1b]*)\x07/;
@@ -299,7 +263,10 @@ export function TerminalPane({
     window.quay.createTerminal(id, cwd, cmd, term.cols, term.rows);
 
     const removeDataListener = window.quay.onTerminalData(id, (data) => {
-      term.write(data);
+      const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY - 1;
+      term.write(data, () => {
+        if (atBottom) term.scrollToBottom();
+      });
 
       const osc7Match = data.match(OSC7_REGEX);
       if (osc7Match) {
@@ -310,23 +277,11 @@ export function TerminalPane({
       if (!hookActiveRef.current) {
         outputBufferRef.current = (outputBufferRef.current + data).slice(-500);
         const buf = stripAnsi(outputBufferRef.current);
+        const status = detectStatus(buf, lastStatusRef.current);
 
-        // Attention is sticky — once detected, only user input (typing) clears it
-        const isAttention =
-          ATTENTION_PATTERNS.some((p) => p.test(buf)) ||
-          CLAUDE_PROMPT_PATTERNS.some((p) => p.test(buf));
-
-        if (isAttention) {
-          emitStatus('attention');
-        } else if (lastStatusRef.current === 'attention') {
-          // Stay in attention until we see a clear done signal (not just any output)
-        } else if (RUNNING_PATTERNS.some((p) => p.test(buf))) {
-          emitStatus('running');
-        } else if (DONE_PATTERNS.some((p) => p.test(buf))) {
-          emitStatus('idle');
-          outputBufferRef.current = '';
-        } else {
-          emitStatus('busy');
+        if (status) {
+          emitStatus(status);
+          if (status === 'idle') outputBufferRef.current = '';
         }
 
         if (idleTimerRef.current) clearTimeout(idleTimerRef.current);

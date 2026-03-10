@@ -18,12 +18,13 @@ if [ -z "$PANE_ID" ] && [ -f "$CACHE_FILE" ]; then
 fi
 if [ -z "$PANE_ID" ] && [ -d "$QUAY_DIR/panes" ]; then
   PID=$$
-  while [ "$PID" != "1" ] && [ -n "$PID" ] && [ "$PID" != "0" ]; do
+  while [ -n "$PID" ] && [ "$PID" != "0" ]; do
     if [ -f "$QUAY_DIR/panes/$PID" ]; then
       PANE_ID=$(cat "$QUAY_DIR/panes/$PID")
       echo -n "$PANE_ID" > "$CACHE_FILE" 2>/dev/null
       break
     fi
+    [ "$PID" = "1" ] && break
     if [ -f "/proc/$PID/status" ]; then
       PID=$(awk '/^PPid:/{print $2}' "/proc/$PID/status" 2>/dev/null)
     elif command -v ps >/dev/null 2>&1; then

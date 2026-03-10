@@ -5,7 +5,9 @@ import pkg from './package.json';
 export default defineConfig({
   define: {
     __BUILD_VERSION__: JSON.stringify(pkg.version),
-    __BUILD_DATE__: JSON.stringify(new Date().toISOString().slice(0, 10)),
+    __BUILD_DATE__: JSON.stringify(
+      new Date().toISOString().slice(0, 16).replace('T', ' '),
+    ),
   },
   plugins: [react()],
   root: 'src',
