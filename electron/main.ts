@@ -14,6 +14,7 @@ if (!isWin) {
   process.env.PATH = [...extraPaths, currentPath].join(':');
 }
 const terminals = new Map<string, pty.IPty>();
+const terminalDisposables = new Map<string, { dispose: () => void }[]>();
 let mainWindow: BrowserWindow | null = null;
 let hookPort = 0;
 let hookServer: Server | null = null;
@@ -194,16 +195,28 @@ ipcMain.handle(
     );
     terminals.set(id, term);
 
-    term.onData((data) => {
-      if (!mainWindow?.isDestroyed()) {
-        mainWindow?.webContents.send(`terminal:data:${id}`, data);
-      }
-    });
+    const disposables: { dispose: () => void }[] = [];
+    terminalDisposables.set(id, disposables);
 
-    term.onExit(() => {
-      terminals.delete(id);
-      unlink(paneFile).catch(() => {});
-    });
+    disposables.push(
+      term.onData((data) => {
+        if (!mainWindow?.isDestroyed()) {
+          mainWindow?.webContents.send(`terminal:data:${id}`, data);
+        }
+      }),
+    );
+
+    disposables.push(
+      term.onExit(() => {
+        terminals.delete(id);
+        const d = terminalDisposables.get(id);
+        if (d) {
+          d.forEach((h) => h.dispose());
+          terminalDisposables.delete(id);
+        }
+        unlink(paneFile).catch(() => {});
+      }),
+    );
 
     if (isWin) {
       // wsl.exe ignores cwd from spawn, so cd after shell is ready
@@ -235,6 +248,11 @@ ipcMain.on('terminal:resize', (_, id: string, cols: number, rows: number) => {
 });
 
 ipcMain.on('terminal:kill', (_, id: string) => {
+  const d = terminalDisposables.get(id);
+  if (d) {
+    d.forEach((h) => h.dispose());
+    terminalDisposables.delete(id);
+  }
   terminals.get(id)?.kill();
   terminals.delete(id);
 });
@@ -301,6 +319,7 @@ ipcMain.on(
 
 function runGitCommand(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
+    const opts = { timeout: 5000 };
     if (isWin) {
       // Replace ~ with $HOME so shell expands it (single quotes prevent tilde expansion)
       const expanded = cwd.startsWith('~') ? '$HOME' + cwd.slice(1) : cwd;
@@ -308,13 +327,14 @@ function runGitCommand(cwd: string, args: string[]): Promise<string> {
       execFile(
         'wsl.exe',
         ['-e', 'sh', '-c', `cd ${cdTarget} && git ${args.join(' ')}`],
+        opts,
         (err, stdout) => {
           if (err) return reject(err);
           resolve(stdout);
         },
       );
     } else {
-      execFile('git', args, { cwd: expandHome(cwd) }, (err, stdout) => {
+      execFile('git', args, { cwd: expandHome(cwd), ...opts }, (err, stdout) => {
         if (err) return reject(err);
         resolve(stdout);
       });

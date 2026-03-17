@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useEffect, useRef, useState, useCallback, memo } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebLinksAddon } from '@xterm/addon-web-links';
@@ -83,6 +83,12 @@ const terminalCache = new Map<
   { term: Terminal; fitAddon: FitAddon; cleanup: () => void }
 >();
 
+function safeFit(term: Terminal, fitAddon: FitAddon) {
+  const dims = fitAddon.proposeDimensions();
+  if (!dims || (dims.cols === term.cols && dims.rows === term.rows)) return;
+  fitAddon.fit();
+}
+
 // eslint-disable-next-line react-refresh/only-export-components
 export function destroyTerminal(paneId: string) {
   const cached = terminalCache.get(paneId);
@@ -94,7 +100,7 @@ export function destroyTerminal(paneId: string) {
   window.quay.kill(paneId);
 }
 
-export function TerminalPane({
+export const TerminalPane = memo(function TerminalPane({
   id,
   cwd,
   cmd,
@@ -112,9 +118,10 @@ export function TerminalPane({
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [mounted, setMounted] = useState(false);
   const [title, setTitle] = useState('shell');
-  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const titleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastStatusRef = useRef<PaneStatus>('idle');
   const outputBufferRef = useRef('');
+  const statusTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hookActiveRef = useRef(false);
   const claudeRunningRef = useRef(false);
 
@@ -185,7 +192,7 @@ export function TerminalPane({
     const cached = terminalCache.get(id);
     if (cached) {
       cached.term.options.fontSize = fontSize;
-      if (active) cached.fitAddon.fit();
+      if (active) safeFit(cached.term, cached.fitAddon);
     }
   }, [id, fontSize, active]);
 
@@ -208,10 +215,10 @@ export function TerminalPane({
       const { term, fitAddon } = cached;
       fitAddonRef.current = fitAddon;
       containerRef.current.appendChild(term.element!);
-      requestAnimationFrame(() => fitAddon.fit());
+      requestAnimationFrame(() => safeFit(term, fitAddon));
 
       const resizeObserver = new ResizeObserver(() => {
-        requestAnimationFrame(() => fitAddon.fit());
+        requestAnimationFrame(() => safeFit(term, fitAddon));
       });
       resizeObserver.observe(containerRef.current);
 
@@ -226,7 +233,7 @@ export function TerminalPane({
       theme: theme === 'light' ? LIGHT_THEME : DARK_THEME,
       cursorBlink: true,
       allowProposedApi: true,
-      scrollback: 5000,
+      scrollback: 1000,
     });
 
     const fitAddon = new FitAddon();
@@ -238,7 +245,8 @@ export function TerminalPane({
     fitAddon.fit();
 
     term.onTitleChange((t) => {
-      setTitle(t);
+      if (titleTimerRef.current) clearTimeout(titleTimerRef.current);
+      titleTimerRef.current = setTimeout(() => setTitle(t), 300);
       const isClaudeRunning = /claude/i.test(t);
       if (isClaudeRunning !== claudeRunningRef.current) {
         claudeRunningRef.current = isClaudeRunning;
@@ -262,6 +270,16 @@ export function TerminalPane({
 
     window.quay.createTerminal(id, cwd, cmd, term.cols, term.rows);
 
+    statusTimerRef.current = setInterval(() => {
+      if (hookActiveRef.current || !outputBufferRef.current) return;
+      const buf = stripAnsi(outputBufferRef.current);
+      const status = detectStatus(buf, lastStatusRef.current);
+      if (status) {
+        emitStatus(status);
+        if (status === 'idle') outputBufferRef.current = '';
+      }
+    }, 3000);
+
     const removeDataListener = window.quay.onTerminalData(id, (data) => {
       const atBottom = term.buffer.active.viewportY >= term.buffer.active.baseY - 1;
       term.write(data, () => {
@@ -276,22 +294,6 @@ export function TerminalPane({
 
       if (!hookActiveRef.current) {
         outputBufferRef.current = (outputBufferRef.current + data).slice(-500);
-        const buf = stripAnsi(outputBufferRef.current);
-        const status = detectStatus(buf, lastStatusRef.current);
-
-        if (status) {
-          emitStatus(status);
-          if (status === 'idle') outputBufferRef.current = '';
-        }
-
-        if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-        if (!claudeRunningRef.current) {
-          idleTimerRef.current = setTimeout(() => {
-            if (lastStatusRef.current === 'busy') {
-              emitStatus('idle');
-            }
-          }, 15000);
-        }
       }
     });
 
@@ -309,14 +311,15 @@ export function TerminalPane({
     });
 
     const cleanup = () => {
-      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      if (statusTimerRef.current) clearInterval(statusTimerRef.current);
+      if (titleTimerRef.current) clearTimeout(titleTimerRef.current);
       removeDataListener();
     };
 
     terminalCache.set(id, { term, fitAddon, cleanup });
 
     const resizeObserver = new ResizeObserver(() => {
-      requestAnimationFrame(() => fitAddon.fit());
+      requestAnimationFrame(() => safeFit(term, fitAddon));
     });
     resizeObserver.observe(containerRef.current);
 
@@ -328,10 +331,15 @@ export function TerminalPane({
   }, [mounted]);
 
   useEffect(() => {
-    if (active && fitAddonRef.current) {
-      requestAnimationFrame(() => fitAddonRef.current?.fit());
+    const cached = terminalCache.get(id);
+    if (cached) {
+      cached.term.options.cursorBlink = active;
     }
-  }, [active]);
+    if (active && fitAddonRef.current) {
+      const t = terminalCache.get(id);
+      if (t) requestAnimationFrame(() => safeFit(t.term, t.fitAddon));
+    }
+  }, [id, active]);
 
   const header = (
     <div className="pane-header">
@@ -360,4 +368,4 @@ export function TerminalPane({
       <div className="pane-body" ref={containerRef} />
     </div>
   );
-}
+});

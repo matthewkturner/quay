@@ -1,6 +1,6 @@
 {
   "name": "quay",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A terminal multiplexer built for multi-repo workflows",
   "main": "dist-electron/main.js",
   "scripts": {

@@ -1,4 +1,11 @@
-import { useRef, useCallback, useEffect, useState, useMemo } from 'react';
+import {
+  useRef,
+  useCallback,
+  useLayoutEffect,
+  useState,
+  useMemo,
+  useReducer,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { TerminalPane } from './TerminalPane';
 import { useDrag } from '../hooks/useDrag';
@@ -144,7 +151,8 @@ function SlotTree({
   );
 }
 
-// Portal-based terminal that renders into a slot
+// Portal-based terminal that renders into a slot — callbacks use refs
+// so we only re-render when value props (id, active, fontSize, theme) change
 function PortaledTerminal({
   id,
   cwd,
@@ -172,6 +180,35 @@ function PortaledTerminal({
   onCwdChange?: (paneId: string, cwd: string) => void;
   onClaudeChange?: (paneId: string, running: boolean) => void;
 }) {
+  const splitRef = useRef(onSplit);
+  const closeRef = useRef(onClose);
+  const statusRef = useRef(onStatusChange);
+  const cwdRef = useRef(onCwdChange);
+  const claudeRef = useRef(onClaudeChange);
+  useLayoutEffect(() => {
+    splitRef.current = onSplit;
+    closeRef.current = onClose;
+    statusRef.current = onStatusChange;
+    cwdRef.current = onCwdChange;
+    claudeRef.current = onClaudeChange;
+  });
+
+  const handleSplitH = useCallback(() => splitRef.current(id, 'horizontal'), [id]);
+  const handleSplitV = useCallback(() => splitRef.current(id, 'vertical'), [id]);
+  const handleClose = useCallback(() => closeRef.current(id), [id]);
+  const handleStatus = useCallback(
+    (paneId: string, status: PaneStatus) => statusRef.current?.(paneId, status),
+    [],
+  );
+  const handleCwd = useCallback(
+    (paneId: string, c: string) => cwdRef.current?.(paneId, c),
+    [],
+  );
+  const handleClaude = useCallback(
+    (paneId: string, running: boolean) => claudeRef.current?.(paneId, running),
+    [],
+  );
+
   return createPortal(
     <TerminalPane
       id={id}
@@ -180,12 +217,12 @@ function PortaledTerminal({
       active={active}
       fontSize={fontSize}
       theme={theme}
-      onSplitH={() => onSplit(id, 'horizontal')}
-      onSplitV={() => onSplit(id, 'vertical')}
-      onClose={() => onClose(id)}
-      onStatusChange={onStatusChange}
-      onCwdChange={onCwdChange}
-      onClaudeChange={onClaudeChange}
+      onSplitH={handleSplitH}
+      onSplitV={handleSplitV}
+      onClose={handleClose}
+      onStatusChange={handleStatus}
+      onCwdChange={handleCwd}
+      onClaudeChange={handleClaude}
     />,
     slot,
   );
@@ -203,16 +240,13 @@ export function PaneTreeView({
   onAgentStatus,
   onCwdChange,
   onClaudeChange,
-  claudePanesRef,
   path = [],
 }: TreeProps) {
   const [slotRefs] = useState(() => new Map<string, HTMLDivElement>());
-  const [, forceUpdate] = useState(0);
+  const [, forceUpdate] = useReducer((n: number) => n + 1, 0);
 
   // Force a re-render after the layout mounts so portals can find their slots
-  useEffect(() => {
-    forceUpdate((n) => n + 1);
-  }, [tree]);
+  useLayoutEffect(forceUpdate, [tree, forceUpdate]);
 
   const paneIds = useMemo(() => collectIds(tree), [tree]);
 
@@ -228,7 +262,6 @@ export function PaneTreeView({
         slotRefs={slotRefs}
         path={path}
       />
-      {/* eslint-disable-next-line react-hooks/refs -- ref read is intentional; cmd is only consumed once at terminal creation */}
       {paneIds.map((id) => {
         const slot = slotRefs.get(id);
         if (!slot) return null;
@@ -237,7 +270,7 @@ export function PaneTreeView({
             key={id}
             id={id}
             cwd={projectPath}
-            cmd={claudePanesRef?.current?.has(id) ? 'claude --continue' : undefined}
+            cmd={undefined}
             active={active}
             slot={slot}
             fontSize={fontSize}

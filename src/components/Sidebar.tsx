@@ -18,22 +18,27 @@ interface Props {
 function StatusIndicator({
   status,
   confirming,
+  hovered,
   onClose,
 }: {
   status: PaneStatus;
   confirming?: boolean;
+  hovered: boolean;
   onClose: (e: React.MouseEvent) => void;
 }) {
   return (
     <span className="status-indicator">
-      <span className={`status-dot status-${status}`} title={status} />
-      <button
-        className={`tab-close ${confirming ? 'tab-close-confirm' : ''}`}
-        onClick={onClose}
-        title={confirming ? 'Click again to confirm' : 'Close project'}
-      >
-        <CloseIcon size={8} />
-      </button>
+      {hovered || confirming ? (
+        <button
+          className={`tab-close ${confirming ? 'tab-close-confirm' : ''}`}
+          onClick={onClose}
+          title={confirming ? 'Click again to confirm' : 'Close project'}
+        >
+          <CloseIcon size={10} />
+        </button>
+      ) : (
+        <span className={`status-dot status-${status}`} title={status} />
+      )}
     </span>
   );
 }
@@ -100,6 +105,7 @@ export function Sidebar({
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dropIndex, setDropIndex] = useState<number | null>(null);
   const [confirmRemoveId, setConfirmRemoveId] = useState<string | null>(null);
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
 
   const handleRemoveClick = useCallback(
     (e: React.MouseEvent, id: string) => {
@@ -156,9 +162,15 @@ export function Sidebar({
               setDropIndex(null);
             }}
           >
-            <button
+            <div
               className={`sidebar-tab ${isActive ? 'active' : ''} ${isDragging ? 'dragging' : ''}`}
               onClick={() => onSelect(project.id)}
+              onMouseEnter={() => setHoveredId(project.id)}
+              onMouseLeave={() =>
+                setHoveredId((prev) => (prev === project.id ? null : prev))
+              }
+              role="button"
+              tabIndex={0}
             >
               <div className="tab-top-row">
                 <EditableName
@@ -168,6 +180,7 @@ export function Sidebar({
                 <StatusIndicator
                   status={status}
                   confirming={confirmRemoveId === project.id}
+                  hovered={hoveredId === project.id}
                   onClose={(e) => handleRemoveClick(e, project.id)}
                 />
               </div>
@@ -188,7 +201,7 @@ export function Sidebar({
                   )}
                 </span>
               )}
-            </button>
+            </div>
           </div>
         );
       })}
